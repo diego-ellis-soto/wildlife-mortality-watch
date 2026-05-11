@@ -7,7 +7,6 @@ sdk: docker
 app_port: 7860
 pinned: false
 license: bsd-2-clause
-short_description: A Shiny dashboard for monitoring wildlife mortality records from iNaturalist.
 ---
 
 # Wildlife Mortality Watch
