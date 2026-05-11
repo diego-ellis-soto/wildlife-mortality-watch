@@ -38,3 +38,14 @@ Mortality records are retrieved from public iNaturalist observations annotated a
 ## Disclaimer
 
 Wildlife Mortality Watch is an independent research tool and is not affiliated with or endorsed by iNaturalist. Observation data and media remain subject to their original iNaturalist user licenses.
+
+
+## Deployment
+
+The full development repository is hosted on GitHub. The Hugging Face Space is deployed from `Code/src/`, which contains the Shiny application, Dockerfile, and Space README metadata.
+
+## Citation
+
+If you use this tool, please cite:
+
+Ellis-Soto, Diego, et al. "Global monitoring of wildlife mortality through participatory science in near-real time." bioRxiv (2025): 2025-08.

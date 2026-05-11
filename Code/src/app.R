@@ -2178,11 +2178,34 @@ format_place_id_api_param <- function(ids) {
 
 # Match any of several place ids in a parquet place_ids column (JSON array strings).
 place_ids_regex_for_ids <- function(ids) {
-  ids <- unique(suppressWarnings(as.integer(ids)))
-  ids <- ids[!is.na(ids)]
+  ids <- normalize_place_ids(ids)
   if (length(ids) == 0) stop("place_ids_regex_for_ids: no valid ids.", call. = FALSE)
   alt <- paste(ids, collapse = "|")
   stringr::regex(paste0("(?<![0-9])(", alt, ")(?![0-9])"))
+}
+
+normalize_place_ids <- function(ids) {
+  ids_chr <- unlist(strsplit(paste(as.character(unlist(ids, use.names = FALSE)), collapse = ","), ","), use.names = FALSE)
+  ids_chr <- trimws(ids_chr)
+  ids_int <- unique(suppressWarnings(as.integer(ids_chr)))
+  ids_int[!is.na(ids_int)]
+}
+
+filter_records_by_place_ids <- function(df, ids) {
+  ids <- normalize_place_ids(ids)
+  if (length(ids) == 0 || is.null(df) || nrow(df) == 0) return(df)
+  place_col <- detect_first_existing_col(df, c("place_ids", "place_ids_std"))
+  if (is.null(place_col)) return(df)
+  place_pat <- place_ids_regex_for_ids(ids)
+  hit <- vapply(df[[place_col]], function(x) {
+    if (is.null(x) || length(x) == 0 || (length(x) == 1 && all(is.na(x)))) return(FALSE)
+    vals <- if (is.list(x)) unlist(x, use.names = FALSE) else x
+    vals <- as.character(vals)
+    vals <- vals[!is.na(vals)]
+    if (length(vals) == 0) return(FALSE)
+    stringr::str_detect(paste(vals, collapse = ","), place_pat)
+  }, logical(1))
+  df[hit, , drop = FALSE]
 }
 
 # Redraw place polygon(s) on the select_map preview.
@@ -2563,7 +2586,8 @@ fetch_top_observers_totals <- function(
     swlat, swlng, nelat, nelng,
     start_date, end_date,
     iconic_taxa = NULL, taxon_id = NULL, taxon_name = NULL,
-    threatened_flag = FALSE
+    threatened_flag = FALSE,
+    place_id = NULL
 ) {
   user_ids <- unique(user_ids[!is.na(user_ids)])
   if (length(user_ids) == 0) return(NULL)
@@ -2594,6 +2618,9 @@ fetch_top_observers_totals <- function(
     }
     if (isTRUE(threatened_flag)) {
       q_parts <- c(q_parts, "threatened=true")
+    }
+    if (!is.null(place_id) && nzchar(as.character(place_id))) {
+      q_parts <- c(q_parts, glue("place_id={place_id}"))
     }
     
     loc_part <- if (
@@ -2923,7 +2950,8 @@ fetch_dead_data_adaptive <- function(
     per_page = 200,
     progress = NULL,
     tile_index = 1,
-    total_tiles = 1
+    total_tiles = 1,
+    place_id = NULL
 ) {
   
   all_results <- list()
@@ -2971,7 +2999,8 @@ fetch_dead_data_adaptive <- function(
       taxon_name = taxon_name,
       threatened_flag = threatened_flag,
       per_page = per_page,
-      progress = progress
+      progress = progress,
+      place_id = place_id
     )
     
     if (isTRUE(week_res$hit_limit)) {
@@ -3014,7 +3043,8 @@ fetch_dead_data_adaptive <- function(
           taxon_name = taxon_name,
           threatened_flag = threatened_flag,
           per_page = per_page,
-          progress = progress
+          progress = progress,
+          place_id = place_id
         )
         
         if (isTRUE(day_res$hit_limit)) {
@@ -3053,7 +3083,8 @@ fetch_dead_data_adaptive <- function(
               taxon_name = taxon_name,
               threatened_flag = threatened_flag,
               per_page = per_page,
-              progress = progress
+              progress = progress,
+              place_id = place_id
             )
             
             all_results[[result_index]] <- half_res$data
@@ -3145,7 +3176,8 @@ getDeadVertebrates_dateRange <- function(
       per_page = per_page,
       max_pages_per_batch = 50,
       progress = .shiny_progress,
-      progress_prefix = paste0("tile ", tile_index, " of ", total_tiles)
+      progress_prefix = paste0("tile ", tile_index, " of ", total_tiles),
+      place_id = place_id
     )
     
     merged_df_all <- paged_res$data
@@ -3169,7 +3201,8 @@ getDeadVertebrates_dateRange <- function(
       per_page    = per_page,
       progress    = .shiny_progress,
       tile_index  = tile_index,
-      total_tiles = total_tiles
+      total_tiles = total_tiles,
+      place_id    = place_id
     )
     
     merged_df_all <- adaptive_res$data
@@ -3177,6 +3210,10 @@ getDeadVertebrates_dateRange <- function(
   }
   
   merged_df_all <- standardize_inat_columns(merged_df_all)
+  
+  if (!is.null(place_id) && nzchar(as.character(place_id))) {
+    merged_df_all <- filter_records_by_place_ids(merged_df_all, place_id)
+  }
   
   merged_df_all <- filter_by_threat_status(
     merged_df_all,
@@ -3651,7 +3688,7 @@ ui <- fluidPage(
             ),
             tags$ul(
               tags$li("Raw counts are the most direct signal but remain effort-sensitive."),
-           #   tags$li("Mortality rate (% of all obs) shows dead observations as a share of all iNaturalist observations in the same area and time window. This helps separate ecological signal from platform-wide observation effort."),
+              #   tags$li("Mortality rate (% of all obs) shows dead observations as a share of all iNaturalist observations in the same area and time window. This helps separate ecological signal from platform-wide observation effort."),
               tags$li("Unique observers provide a rough proxy for observer effort."),
               tags$li("Observations per observer can help contextualize spikes, though it is not a formal bias-corrected rate."),
               tags$li("The Top Observers tab shows which observers contribute the most mortality records and, in live mode, what fraction of their observations are dead."),
@@ -4462,7 +4499,8 @@ server <- function(input, output, session) {
           iconic_taxa = NULL,
           taxon_id = NULL,
           taxon_name = NULL,
-          threatened_flag = FALSE
+          threatened_flag = FALSE,
+          place_id = place_id_api
         )
       },
       numeric(1)
@@ -4484,7 +4522,8 @@ server <- function(input, output, session) {
             iconic_taxa = taxon_count_query$iconic_taxa,
             taxon_id = taxon_count_query$taxon_id,
             taxon_name = taxon_count_query$taxon_name,
-            threatened_flag = FALSE
+            threatened_flag = FALSE,
+            place_id = place_id_api
           )
         },
         numeric(1)
@@ -4503,7 +4542,8 @@ server <- function(input, output, session) {
             iconic_taxa = taxon_count_query$iconic_taxa,
             taxon_id = taxon_count_query$taxon_id,
             taxon_name = taxon_count_query$taxon_name,
-            threatened_flag = FALSE
+            threatened_flag = FALSE,
+            place_id = place_id_api
           )
         },
         numeric(1)
@@ -4549,6 +4589,10 @@ server <- function(input, output, session) {
         distinct(id, .keep_all = TRUE)
       
       inat_all <- standardize_inat_columns(inat_all)
+      
+      if (has_place) {
+        inat_all <- filter_records_by_place_ids(inat_all, rv$selected_place$id)
+      }
       
       if ("observed_on" %in% names(inat_all)) {
         inat_all <- inat_all %>%
@@ -4624,7 +4668,8 @@ server <- function(input, output, session) {
           iconic_taxa = if (input$filter_mode == "taxonomy" && input$query_type == "iconic") input$iconic_taxon else NULL,
           taxon_id = taxonomy_sel$id,
           taxon_name = taxonomy_sel$name,
-          time_bin = input$time_bin
+          time_bin = input$time_bin,
+          place_id = place_id_api
         )
       })
       rv$all_obs_histogram <- dplyr::bind_rows(Filter(Negate(is.null), all_hist_parts)) |>
@@ -4713,7 +4758,8 @@ server <- function(input, output, session) {
           metric_type     = input$metric_type,
           show_smoother   = input$show_smoother,
           tile_index      = tile_i,
-          total_tiles     = length(query_windows)
+          total_tiles     = length(query_windows),
+          place_id        = place_id_api
         )
       })
       
@@ -4891,7 +4937,8 @@ server <- function(input, output, session) {
           iconic_taxa = iconic_val,
           taxon_id = taxon_id_val,
           taxon_name = taxon_val,
-          time_bin = input$time_bin
+          time_bin = input$time_bin,
+          place_id = place_id_api
         )
       })
       rv$all_obs_histogram <- dplyr::bind_rows(Filter(Negate(is.null), all_hist_parts)) |>
@@ -4917,7 +4964,8 @@ server <- function(input, output, session) {
             iconic_taxa = iconic_val,
             taxon_id = taxon_id_val,
             taxon_name = taxon_val,
-            threatened_flag = threatened_flag
+            threatened_flag = threatened_flag,
+            place_id = place_id_api
           ),
           error = function(e) NULL
         )
