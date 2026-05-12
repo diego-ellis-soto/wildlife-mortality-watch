@@ -3622,7 +3622,7 @@ ui <- fluidPage(
             ),
             tags$p(
               class = "about-subtle",
-              "Diego Ellis-Soto,  Liam U. Taylor,  Elizabeth Edson,  Avery Hill,  Jane Wildness, Christopher J. Schell,  Carl Boettiger,  Rebecca F. Johnson"
+              "Diego Ellis-Soto,  Liam U. Taylor,  Elizabeth Edson,  Avery Hill,  Jane Widness, Christopher J. Schell,  Carl Boettiger,  Rebecca F. Johnson"
             )
           ),
           
