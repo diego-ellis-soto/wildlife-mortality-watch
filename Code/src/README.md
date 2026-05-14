@@ -49,3 +49,14 @@ The full development repository is hosted on GitHub. The Hugging Face Space is d
 If you use this tool, please cite:
 
 Ellis-Soto, Diego, et al. "Global monitoring of wildlife mortality through participatory science in near-real time." bioRxiv (2025): 2025-08.
+
+# Whenever updating the App:
+
+git status
+git add .
+git commit -m "Update Wildlife Mortality Watch app"
+git push origin main
+
+git subtree split --prefix Code/src -b hf-main
+git push --force hf hf-main:main
+git branch -D hf-main

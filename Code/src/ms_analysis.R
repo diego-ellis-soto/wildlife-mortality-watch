@@ -1531,3 +1531,155 @@ mapview(
 
 # https://gis.stackexchange.com/questions/119993/convert-line-shapefile-to-raster-value-total-length-of-lines-within-cell
 # https://catalog.data.gov/dataset/enviroatlas-road-density-metrics-by-12-digit-huc-for-the-conterminous-united-states3
+
+
+# ============================================================
+# Dead-annotated Animalia records per 100,000 Animalia records
+# ============================================================
+
+# install.packages(c("httr2", "tidyverse", "scales"))
+
+library(httr2)
+library(tidyverse)
+library(scales)
+
+# ------------------------------------------------------------
+# Constants
+# ------------------------------------------------------------
+
+inat_api <- "https://api.inaturalist.org/v1"
+
+# iNaturalist IDs
+animalia_taxon_id <- 1      # Animalia
+alive_dead_term <- 17       # Alive or Dead annotation term
+dead_value <- 19            # Dead value
+
+# Plot colors
+inat_green <- "#74AC00"
+inat_dark <- "#4D7C00"
+
+# ------------------------------------------------------------
+# API helper functions
+# ------------------------------------------------------------
+
+inat_get <- function(endpoint, params = list()) {
+  req <- request(paste0(inat_api, endpoint)) |>
+    req_user_agent("iNat mortality relative-rate figure R script")
+  
+  req <- do.call(req_url_query, c(list(req), params))
+  
+  resp <- req |>
+    req_retry(max_tries = 3) |>
+    req_perform()
+  
+  resp_body_json(resp, simplifyVector = TRUE)
+}
+
+get_year_histogram <- function(params, value_name) {
+  out <- inat_get("/observations/histogram", params)
+  
+  enframe(
+    unlist(out$results$year),
+    name = "year_raw",
+    value = value_name
+  ) |>
+    mutate(
+      year = as.integer(str_extract(year_raw, "^\\d{4}"))
+    ) |>
+    select(year, all_of(value_name)) |>
+    arrange(year)
+}
+
+# ------------------------------------------------------------
+# Query annual dead-annotated Animalia records
+# ------------------------------------------------------------
+
+dead_by_year <- get_year_histogram(
+  params = list(
+    term_id = alive_dead_term,
+    term_value_id = dead_value,
+    taxon_id = animalia_taxon_id,
+    date_field = "created",
+    interval = "year",
+    verifiable = "any"
+  ),
+  value_name = "dead_records"
+)
+
+# ------------------------------------------------------------
+# Query annual total Animalia records
+# ------------------------------------------------------------
+
+animalia_by_year <- get_year_histogram(
+  params = list(
+    taxon_id = animalia_taxon_id,
+    date_field = "created",
+    interval = "year",
+    verifiable = "any"
+  ),
+  value_name = "animalia_records"
+)
+
+# ------------------------------------------------------------
+# Calculate relative rate
+# ------------------------------------------------------------
+
+current_year <- as.integer(format(Sys.Date(), "%Y"))
+
+rate_df <- animalia_by_year |>
+  left_join(dead_by_year, by = "year") |>
+  mutate(
+    dead_records = replace_na(dead_records, 0),
+    dead_per_100k_animalia = dead_records / animalia_records * 100000,
+    partial_year = year == current_year
+  ) |>
+  filter(year >= 2007)
+
+# Optional: inspect values
+print(rate_df)
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_rate <- ggplot(rate_df, aes(x = year, y = dead_per_100k_animalia)) +
+  geom_col(
+    aes(alpha = partial_year),
+    fill = inat_green,
+    colour = inat_dark,
+    width = 0.8
+  ) +
+  scale_alpha_manual(
+    values = c("FALSE" = 1, "TRUE" = 0.5),
+    guide = "none"
+  ) +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(
+    breaks = pretty_breaks(),
+    expand = expansion(mult = c(0.01, 0.02))
+  ) +
+  coord_cartesian(xlim = c(2007, current_year + 1)) +
+  labs(
+    title = "Mortality records relative to Animalia",
+    x = "Year added to iNaturalist",
+    y = "Dead-annotated observations\nper 100,000 Animalia observations"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+
+p_rate
+
+# ------------------------------------------------------------
+# Save figure
+# ------------------------------------------------------------
+
+ggsave(
+  filename = "dead_annotated_per_100k_animalia.png",
+  plot = p_rate,
+  width = 7,
+  height = 4.5,
+  dpi = 300
+)
