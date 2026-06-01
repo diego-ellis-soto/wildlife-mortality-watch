@@ -60,3 +60,6 @@ git push origin main
 git subtree split --prefix Code/src -b hf-main
 git push --force hf hf-main:main
 git branch -D hf-main
+
+# Next steps:
+Push App revision with percentage relative to total records
