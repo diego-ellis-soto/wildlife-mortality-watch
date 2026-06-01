@@ -1213,12 +1213,126 @@ make_summary_text <- function(df) {
   )
 }
 
+format_summary_count <- function(x) {
+  if (is.null(x) || length(x) == 0) return("NA")
+  x <- suppressWarnings(as.numeric(x[1]))
+  if (!is.finite(x)) return("NA")
+  format(round(x), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+format_summary_pct <- function(x, digits = 4) {
+  if (is.null(x) || length(x) == 0) return("NA")
+  x <- suppressWarnings(as.numeric(x[1]))
+  if (!is.finite(x)) return("NA")
+  paste0(formatC(x, format = "f", digits = digits), "%")
+}
+
+format_summary_peak_bin <- function(x, time_bin = "day") {
+  if (is.null(x) || length(x) == 0 || all(is.na(x))) return("NA")
+  x <- as.Date(x[1])
+  if (is.na(x)) return("NA")
+  if (time_bin == "month") return(format(x, "%Y-%m"))
+  format(x, "%Y-%m-%d")
+}
+
+make_query_summary_stats <- function(df, all_obs_count = NA_real_, time_bin = "day") {
+  empty_stats <- list(
+    mortality_records = "0",
+    all_observations = format_summary_count(all_obs_count),
+    mortality_pct = "NA",
+    unique_observers = "NA",
+    peak_time_bin = "NA",
+    peak_time_note = time_bin
+  )
+  
+  if (is.null(df) || nrow(df) == 0) return(empty_stats)
+  
+  tmp <- df %>%
+    standardize_inat_columns() %>%
+    dplyr::mutate(
+      summary_record_id = if ("id" %in% names(.)) {
+        dplyr::if_else(
+          is.na(id),
+          paste0("row_", dplyr::row_number()),
+          as.character(id)
+        )
+      } else {
+        as.character(dplyr::row_number())
+      }
+    )
+  
+  n_mortality <- dplyr::n_distinct(tmp$summary_record_id)
+  
+  n_observers <- if ("observer_std" %in% names(tmp)) {
+    obs_vals <- tmp$observer_std
+    obs_vals <- obs_vals[!is.na(obs_vals) & nzchar(as.character(obs_vals))]
+    dplyr::n_distinct(obs_vals)
+  } else {
+    NA_integer_
+  }
+  
+  all_obs_numeric <- if (is.null(all_obs_count) || length(all_obs_count) == 0) {
+    NA_real_
+  } else {
+    suppressWarnings(as.numeric(all_obs_count[1]))
+  }
+  mortality_pct <- if (is.finite(all_obs_numeric) && all_obs_numeric > 0) {
+    100 * n_mortality / all_obs_numeric
+  } else {
+    NA_real_
+  }
+  
+  peak_label <- "NA"
+  peak_note <- time_bin
+  
+  if ("observed_on" %in% names(tmp)) {
+    tmp_peak <- tmp %>%
+      dplyr::mutate(obs_bin = make_time_bin(as.Date(observed_on), time_bin = time_bin))
+    
+    counts_by_bin <- tmp_peak %>%
+      dplyr::filter(!is.na(obs_bin)) %>%
+      dplyr::group_by(obs_bin) %>%
+      dplyr::summarise(n = dplyr::n_distinct(summary_record_id), .groups = "drop")
+    
+    if (nrow(counts_by_bin) > 0) {
+      peak_row <- counts_by_bin %>%
+        dplyr::arrange(dplyr::desc(n), obs_bin) %>%
+        dplyr::slice_head(n = 1)
+      
+      peak_label <- paste0(
+        format_summary_peak_bin(peak_row$obs_bin, time_bin = time_bin),
+        " (",
+        format_summary_count(peak_row$n),
+        ")"
+      )
+    }
+  }
+  
+  list(
+    mortality_records = format_summary_count(n_mortality),
+    all_observations = format_summary_count(all_obs_count),
+    mortality_pct = format_summary_pct(mortality_pct),
+    unique_observers = format_summary_count(n_observers),
+    peak_time_bin = peak_label,
+    peak_time_note = time_bin
+  )
+}
+
+summary_stat_card <- function(label, value, note = NULL) {
+  tags$div(
+    class = "query-summary-card",
+    tags$div(class = "query-summary-card-label", label),
+    tags$div(class = "query-summary-card-value", value),
+    tags$div(class = "query-summary-card-note", note %||% "")
+  )
+}
+
 make_sampling_note <- function(metric_type) {
   if (metric_type == "raw_counts") {
     return("Sampling note: raw mortality counts reflect both mortality signal and observation effort. Compare against unique observers or observations per observer when interpreting spikes.")
   }
   if (metric_type == "dead_vs_all") {
-    return("Sampling note: the mortality rate (% of all observations) helps separate ecological signal from observer effort, but is not a formal measure. The orange line shows the share of all iNaturalist observations annotated as dead in each time bin.")
+    return("Sampling note: the mortality percentage is descriptive context, not a formal mortality rate. The orange line shows each time bin's dead observations as a percentage of all iNaturalist observations in the full selected query window.")
   }
   if (metric_type == "unique_observers") {
     return("Sampling note: this view summarizes observer effort rather than mortality burden directly.")
@@ -1247,6 +1361,7 @@ make_query_metadata <- function(input, bbox, mode, diagnostics, n_records) {
     time_aggregation = input$time_bin,
     metric_type = input$metric_type,
     show_smoother = isTRUE(input$show_smoother),
+    show_all_activity = isTRUE(input$show_all_activity),
     filter_mode = input$filter_mode,
     taxonomy_query_type = if (input$filter_mode == "taxonomy") input$query_type else NULL,
     iconic_taxon = if (input$filter_mode == "taxonomy") input$iconic_taxon else NULL,
@@ -1414,11 +1529,20 @@ make_daily_plot <- function(
     ) %>%
       mutate(
         m = dplyr::coalesce(m, 0L),
-        pct = dplyr::if_else(!is.na(a) & a > 0, 100 * m / a, NA_real_),
         Window = format(obs_bin, "%Y")
       ) %>%
       filter(!is.na(obs_bin)) %>%
       arrange(obs_bin)
+    
+    all_obs_total <- sum(share_df$a, na.rm = TRUE)
+    if (!is.finite(all_obs_total) || all_obs_total <= 0) {
+      return(ggplot() + theme_void() +
+               labs(title = "Mortality percentage unavailable",
+                    subtitle = "A positive all-observations denominator is needed for this metric."))
+    }
+    
+    share_df <- share_df %>%
+      mutate(pct = 100 * m / all_obs_total)
     
     if (nrow(share_df) == 0 || all(is.na(share_df$pct))) {
       return(ggplot() + theme_void() +
@@ -1443,7 +1567,7 @@ make_daily_plot <- function(
     
     sub_dual <- paste0(
       start_date, " to ", end_date,
-      "\nColored lines: mortality count (left axis). Orange line: mortality as % of all obs (right axis)."
+      "\nColored lines: mortality count (left axis). Orange line: mortality count as % of total all observations in the selected query (right axis)."
     )
     
     p <- ggplot(share_df, aes(x = obs_bin)) +
@@ -1458,8 +1582,8 @@ make_daily_plot <- function(
         expand = expansion(mult = c(0, 0.04)),
         sec.axis = sec_axis(
           transform = ~ . / max_m * pct_axis_max,
-          name = "Mortality share of all observations (%)",
-          labels = function(x) paste0(formatC(x, digits = 2, format = "f"), "%")
+          name = "Mortality records as % of total observations (%)",
+          labels = scales::label_percent(scale = 1, accuracy = 0.001)
         )
       ) +
       labs(
@@ -3337,6 +3461,44 @@ ui <- fluidPage(
     font-size: 13px;
   }
 
+  .query-summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+    gap: 10px;
+    margin: 10px 0 14px 0;
+  }
+
+  .query-summary-card {
+    background: #ffffff;
+    border: 1px solid #e6e8eb;
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-height: 88px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+  }
+
+  .query-summary-card-label {
+    color: #50627a;
+    font-size: 12px;
+    line-height: 1.2;
+    margin-bottom: 5px;
+  }
+
+  .query-summary-card-value {
+    color: #24292f;
+    font-size: 24px;
+    font-weight: 800;
+    line-height: 1.1;
+    letter-spacing: -0.2px;
+  }
+
+  .query-summary-card-note {
+    color: #6b7280;
+    font-size: 11px;
+    line-height: 1.2;
+    margin-top: 5px;
+  }
+
   .warning-box {
     background: #fffaf0;
     border-left: 3px solid #e5b75c;
@@ -3487,6 +3649,14 @@ ui <- fluidPage(
           ),
           
           checkboxInput("show_smoother", "Show smoother", value = TRUE),
+          checkboxInput(
+            "show_all_activity",
+            "Also show mortality as % of total observations",
+            value = FALSE
+          ),
+          helpText(
+            "Adds a second axis showing each time bin's dead observations divided by the total number of all iNaturalist observations across the full selected query. Use as descriptive context, not a formal mortality rate."
+          ),
           
           hr(),
           
@@ -3897,6 +4067,7 @@ ui <- fluidPage(
         tabPanel(
           "Daily Time Series",
           div(class = "note-box", textOutput("samplingNote")),
+          uiOutput("querySummaryCards"),
           fluidRow(
             column(
               width = 8,
@@ -4978,11 +5149,45 @@ server <- function(input, output, session) {
   # OUTPUTS
   ##################################################################################################
   output$samplingNote <- renderText({
-    make_sampling_note(input$metric_type)
+    effective_metric <- if (isTRUE(input$show_all_activity)) "dead_vs_all" else input$metric_type
+    make_sampling_note(effective_metric)
   })
   
   output$mortalityRateNote <- renderText({
     make_sampling_note("dead_vs_all")
+  })
+  
+  output$querySummaryCards <- renderUI({
+    req(result_data())
+    rd <- result_data()
+    
+    taxon_total <- suppressWarnings(as.numeric(rv$total_taxon_obs_count))
+    all_total <- if (length(taxon_total) > 0 && is.finite(taxon_total[1]) && taxon_total[1] > 0) {
+      taxon_total[1]
+    } else {
+      rv$total_obs_count
+    }
+    
+    stats <- make_query_summary_stats(
+      rd$merged_df_all,
+      all_obs_count = all_total,
+      time_bin = input$time_bin
+    )
+    
+    all_obs_note <- if (length(taxon_total) > 0 && is.finite(taxon_total[1]) && taxon_total[1] > 0) {
+      "selected taxon if available"
+    } else {
+      "selected query window"
+    }
+    
+    tags$div(
+      class = "query-summary-row",
+      summary_stat_card("Mortality records", stats$mortality_records, "after active filters"),
+      summary_stat_card("All observations", stats$all_observations, all_obs_note),
+      summary_stat_card("Mortality % of total", stats$mortality_pct, "records / all observations"),
+      summary_stat_card("Unique observers", stats$unique_observers, "after active filters"),
+      summary_stat_card("Peak time bin", stats$peak_time_bin, stats$peak_time_note)
+    )
   })
   
   output$total_inat_text <- renderText({
@@ -5070,13 +5275,16 @@ server <- function(input, output, session) {
     req(result_data())
     rd <- result_data()
     
+    effective_metric <- if (isTRUE(input$show_all_activity)) "dead_vs_all" else input$metric_type
+    
     make_daily_plot(
       rd$merged_df_all,
       start_date = input$date_range[1],
       end_date = input$date_range[2],
       time_bin = input$time_bin,
-      metric_type = input$metric_type,
-      show_smoother = input$show_smoother
+      metric_type = effective_metric,
+      show_smoother = input$show_smoother,
+      all_obs_histogram_df = if (isTRUE(input$show_all_activity)) rv$all_obs_histogram else NULL
     )
   }, res = 140)
   
