@@ -15,4 +15,5 @@ install.packages(c(
   "glue",
   "tidyverse",
   "jsonlite",
-  "httr"))
+  "httr",
+  'bslib'))
