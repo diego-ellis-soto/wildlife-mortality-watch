@@ -360,11 +360,14 @@ animalia |> filter(taxon.conservation_status.status_name == 'critically endanger
 world <- ne_countries(scale = "medium", returnclass = "sf")
 americas <- ne_countries(continent = c("South America", 'North America', 'Central America'))
 
-puma = read.csv('indir/resubmission_case_studies/Puma/puma_case_study_2inat_dead_filtered_2026-05-12.csv',
+# puma = read.csv('indir/resubmission_case_studies/Puma/puma_case_study_2inat_dead_filtered_2026-05-12.csv',
+#                 stringsAsFactors = FALSE)
+
+puma = read.csv('indir/Puma/puma_case_study_2inat_dead_filtered_2026-05-12.csv',
                 stringsAsFactors = FALSE)
 
 
-puma_range <- st_read('indir/redlist_species_data_0df88387-092f-4347-a28b-a17db80c88bc/data_0.shp')
+puma_range <- st_read('indir/Puma/data_0.shp')
 
 puma_inat <- puma %>% 
   filter(grepl("Puma concolor", taxon.name, ignore.case = TRUE))
@@ -486,6 +489,12 @@ df <- df %>%
     country = if_else(country == "France", "French Guiana", country)
   )
 
+df <- df %>%
+  mutate(
+    flag_pos  = pmax(count + 1, 6),
+    label_pos = flag_pos + 5
+  )
+
 # 5. Complete flag lookup
 flag_lookup <- tibble(
   country = c(
@@ -545,6 +554,59 @@ puma_death <- ggplot(df, aes(x = reorder(country, count), y = count)) +
   )
 
 puma_death
+
+puma_death <- ggplot(df, aes(x = reorder(country, count), y = count)) +
+  geom_col(fill = "grey") +
+  
+  geom_image(
+    aes(y = flag_pos, image = flag),
+    size = 0.08,
+    na.rm = TRUE
+  ) +
+  
+  geom_text(
+    aes(y = label_pos, label = count),
+    hjust = 0,
+    size = 6,
+    fontface = "bold",
+    color = "black"
+  ) +
+  
+  coord_flip(clip = "off") +
+  
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  
+  labs(
+    x = "Country",
+    y = "Mortality Count",
+    title = "Mountain Lion Deaths (2022–2026)"
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(
+      face = "bold", size = 16, color = "black"
+    ),
+    axis.text.y = element_text(
+      face = "bold", size = 16, color = "black"
+    ),
+    axis.title.x = element_text(
+      face = "bold", size = 16, color = "black"
+    ),
+    axis.title.y = element_text(
+      face = "bold", size = 16, color = "black"
+    ),
+    plot.title = element_text(
+      face = "bold", size = 18, hjust = 0.5, color = "black"
+    ),
+    plot.margin = margin(5.5, 25, 5.5, 5.5)
+  )
+
+puma_death
+
+
 
 ggsave(puma_death, file = "outdir/resubmission_puma_death.png", width = 10, height = 6, dpi = 600)
 

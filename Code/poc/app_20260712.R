@@ -629,7 +629,16 @@ make_adaptive_date_scale <- function(start_date, end_date, time_bin = "day") {
     )
   }
   
-  scale_x_date(date_labels = "%Y", date_breaks = "1 year", expand = expansion(mult = c(0.01, 0.02)))
+  scale_x_date(
+    limits = c(
+      as.Date(start_date),
+      as.Date(end_date)
+    ),
+    date_labels = "%Y",
+    date_breaks = "1 year",
+    expand = expansion(mult = c(0.01, 0.01)),
+    minor_breaks = NULL
+  )
 }
 
 ####################################################################################################
@@ -1331,8 +1340,8 @@ make_sampling_note <- function(metric_type) {
   if (metric_type == "raw_counts") {
     return("Sampling note: raw mortality counts reflect both mortality signal and observation effort. Compare against unique observers or observations per observer when interpreting spikes.")
   }
-  if (metric_type == "dead_vs_all") {
-    return("Sampling note: the mortality percentage is descriptive context, not a formal mortality rate. The orange line shows each time bin's dead observations as a percentage of all iNaturalist observations in the full selected query window.")
+  if (metric_type %in% c("dead_vs_all", "relative_percentage")) {
+    return("Sampling note: the mortality percentage is descriptive context, not a formal mortality rate. Each time bin shows mortality-tagged observations as a percentage of all matching iNaturalist observations in that same time bin.")
   }
   if (metric_type == "unique_observers") {
     return("Sampling note: this view summarizes observer effort rather than mortality burden directly.")
@@ -1352,7 +1361,7 @@ make_query_metadata <- function(input, bbox, mode, diagnostics, n_records) {
       swlng = bbox$swlng,
       nelat = bbox$nelat,
       nelng = bbox$nelng,
-      crosses_antimeridian = bbox$crosses_antimeridian
+  # crosses_antimeridian    crosses_antimeridian = bbox$crosses_antimeridian
     ),
     date_range = list(
       start = as.character(input$date_range[1]),
@@ -1361,7 +1370,9 @@ make_query_metadata <- function(input, bbox, mode, diagnostics, n_records) {
     time_aggregation = input$time_bin,
     metric_type = input$metric_type,
     show_smoother = isTRUE(input$show_smoother),
-    show_all_activity = isTRUE(input$show_all_activity),
+    time_series_layout = "stacked",
+    min_all_observations_per_bin = suppressWarnings(as.integer(input$min_all_obs_for_pct %||% 20)),
+    show_percentage_labels = isTRUE(input$show_pct_labels),
     filter_mode = input$filter_mode,
     taxonomy_query_type = if (input$filter_mode == "taxonomy") input$query_type else NULL,
     iconic_taxon = if (input$filter_mode == "taxonomy") input$iconic_taxon else NULL,
@@ -1652,7 +1663,12 @@ make_daily_plot <- function(
     ) +
     coord_cartesian(clip = "off") +
     theme_minimal(base_size = 14) +
-    theme_ts
+    theme_ts +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(face = "bold")
+    )
   
   if (show_smoother && nrow(plot_df) >= 10 && length(unique(plot_df$value)) >= 3) {
     smooth_df <- make_nonnegative_smooth_df(
@@ -1679,153 +1695,631 @@ make_daily_plot <- function(
 }
 
 
-make_mortality_rate_plot <- function(
+prepare_mortality_percentage_data <- function(
     df,
-    start_date,
-    end_date,
     time_bin = "day",
-    show_smoother = TRUE,
     all_obs_histogram_df = NULL,
-    min_all_obs_for_rate = 30,
-    min_dead_obs_for_rate = 2
+    min_all_obs = 20
 ) {
-  
-  if (!"observed_on" %in% names(df)) return(ggplot() + theme_void() + labs(title = "No date info available"))
-  if (nrow(df) == 0) return(ggplot() + theme_void() + labs(title = "No mortality data"))
-  
-  if (is.null(all_obs_histogram_df) || nrow(all_obs_histogram_df) == 0) {
-    return(
-      ggplot() +
-        theme_void() +
-        labs(
-          title = "Mortality rate unavailable",
-          subtitle = "All-observations histogram data is needed for this metric.\nRe-run the query to fetch it."
-        )
-    )
+
+  if (is.null(df) || !"observed_on" %in% names(df)) {
+    return(tibble::tibble())
   }
-  
+
+  if (is.null(all_obs_histogram_df) || nrow(all_obs_histogram_df) == 0) {
+    return(tibble::tibble())
+  }
+
+  min_all_obs <- suppressWarnings(as.numeric(min_all_obs[1]))
+  if (!is.finite(min_all_obs) || min_all_obs < 1) min_all_obs <- 1
+
   tmp <- df %>%
     standardize_inat_columns() %>%
     mutate(
       obs_date = as.Date(observed_on),
-      obs_bin  = make_time_bin(obs_date, time_bin = time_bin)
+      obs_bin = make_time_bin(obs_date, time_bin = time_bin)
     ) %>%
     filter(!is.na(obs_bin))
-  
-  if (nrow(tmp) == 0) return(ggplot() + theme_void() + labs(title = "No valid dates found"))
-  
-  mort_df <- tmp %>%
+
+  mortality_df <- if (nrow(tmp) > 0) {
+    if ("id" %in% names(tmp)) {
+      tmp %>%
+        group_by(obs_bin) %>%
+        summarise(
+          mortality_obs = n_distinct(id),
+          .groups = "drop"
+        )
+    } else {
+      tmp %>%
+        count(obs_bin, name = "mortality_obs")
+    }
+  } else {
+    tibble::tibble(
+      obs_bin = as.Date(character()),
+      mortality_obs = integer()
+    )
+  }
+
+  denominator_df <- all_obs_histogram_df %>%
+    transmute(
+      obs_bin = as.Date(obs_bin),
+      all_obs = suppressWarnings(as.numeric(all_count))
+    ) %>%
+    filter(!is.na(obs_bin), is.finite(all_obs), all_obs >= 0) %>%
     group_by(obs_bin) %>%
-    summarise(dead_obs = n_distinct(id), .groups = "drop")
-  
-  rate_all_df <- dplyr::full_join(
-    mort_df,
-    all_obs_histogram_df %>% dplyr::rename(all_obs = all_count),
-    by = "obs_bin"
-  ) %>%
+    summarise(
+      all_obs = sum(all_obs, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  full_join(denominator_df, mortality_df, by = "obs_bin") %>%
     mutate(
-      dead_obs = dplyr::coalesce(dead_obs, 0L),
-      mortality_pct_raw = dplyr::if_else(!is.na(all_obs) & all_obs > 0, 100 * dead_obs / all_obs, NA_real_),
-      low_denominator = !is.na(all_obs) & all_obs > 0 & all_obs < min_all_obs_for_rate,
-      low_mortality_count = dead_obs > 0 & dead_obs < min_dead_obs_for_rate,
-      unstable_rate = low_denominator | low_mortality_count,
+      mortality_obs = dplyr::coalesce(mortality_obs, 0L),
+      all_obs = suppressWarnings(as.numeric(all_obs)),
+      invalid_denominator = is.na(all_obs) | all_obs <= 0 | mortality_obs > all_obs,
+      low_denominator = !invalid_denominator & all_obs < min_all_obs,
+      displayed = !invalid_denominator & all_obs >= min_all_obs,
+      mortality_pct_raw = dplyr::if_else(
+        !invalid_denominator,
+        100 * mortality_obs / all_obs,
+        NA_real_
+      ),
       mortality_pct = dplyr::if_else(
-        !is.na(all_obs) &
-          all_obs >= min_all_obs_for_rate &
-          dead_obs >= min_dead_obs_for_rate,
+        displayed,
         mortality_pct_raw,
         NA_real_
+      ),
+      count_label = paste0(
+        scales::comma(mortality_obs),
+        " / ",
+        scales::comma(all_obs)
       )
     ) %>%
     filter(!is.na(obs_bin)) %>%
     arrange(obs_bin)
-  
-  unstable_df <- rate_all_df %>%
-    filter(unstable_rate, !is.na(mortality_pct_raw))
-  
-  rate_df <- rate_all_df %>%
-    filter(!is.na(mortality_pct))
-  
-  if (nrow(rate_df) == 0 || all(is.na(rate_df$mortality_pct))) {
+}
+
+
+make_mortality_percentage_plot <- function(
+    df,
+    start_date,
+    end_date,
+    time_bin = "day",
+    all_obs_histogram_df = NULL,
+    min_all_obs = 20,
+    show_labels = FALSE,
+    scope_label = "matching observations"
+) {
+
+  pct_all <- prepare_mortality_percentage_data(
+    df = df,
+    time_bin = time_bin,
+    all_obs_histogram_df = all_obs_histogram_df,
+    min_all_obs = min_all_obs
+  )
+
+  if (nrow(pct_all) == 0) {
     return(
       ggplot() +
         theme_void() +
         labs(
-          title = "Not enough stable reference data for mortality-rate calculation",
-          subtitle = glue("No {time_bin} bins met both thresholds: at least {min_all_obs_for_rate} total observations and at least {min_dead_obs_for_rate} mortality observations. Try Week or Month aggregation.")
+          title = "Relative percentage unavailable",
+          subtitle = "The matching-observations histogram was not returned. Re-run the query."
         )
     )
   }
+
+  # plot_df <- pct_all %>%
+  #   mutate(
+  #     plot_pct = dplyr::if_else(displayed, mortality_pct_raw, NA_real_),
+  #     # Use a separate group after every excluded bin so the line does not
+  #     # visually bridge across missing or low-denominator time bins.
+  #     line_group = cumsum(!displayed)
+  #   )
   
-  anomaly_cutoff <- quantile(rate_df$mortality_pct, probs = 0.90, na.rm = TRUE)
-  anomaly_df <- rate_df %>% filter(mortality_pct >= anomaly_cutoff)
+  year_range <- sort(c(
+    as.integer(format(as.Date(start_date), "%Y")),
+    as.integer(format(as.Date(end_date), "%Y"))
+  ))
   
-  theme_ts <- theme(
-    plot.title        = element_text(face = "bold", size = 20),
-    plot.subtitle     = element_text(color = "grey30", size = 11, lineheight = 1.15),
-    axis.text.x       = element_text(angle = 45, hjust = 1, vjust = 1, color = "black", margin = margin(t = 8)),
-    axis.text.y       = element_text(color = "black"),
-    axis.title.x      = element_text(face = "bold", margin = margin(t = 22)),
-    axis.title.y      = element_text(face = "bold", margin = margin(r = 22)),
-    panel.grid.minor  = element_blank(),
-    plot.margin       = margin(t = 12, r = 32, b = 80, l = 70)
+  year_levels <- as.character(
+    seq.int(year_range[1], year_range[2])
   )
   
-  p <- ggplot(rate_df, aes(x = obs_bin, y = mortality_pct)) +
-    geom_line(linewidth = 0.9, color = "#B35929") +
-    geom_point(size = 1.8, color = "#B35929") +
+  plot_df <- pct_all %>%
+    mutate(
+      Window = factor(
+        format(obs_bin, "%Y"),
+        levels = year_levels
+      ),
+      plot_pct = dplyr::if_else(
+        displayed,
+        mortality_pct_raw,
+        NA_real_
+      ),
+      line_group = cumsum(!displayed)
+    )
+  
+  stable_df <- plot_df %>%
+    filter(displayed, is.finite(plot_pct))
+
+  positive_stable <- stable_df %>%
+    filter(mortality_obs > 0)
+
+  zero_stable <- stable_df %>%
+    filter(mortality_obs == 0)
+  
+  
+  suppressed_df <- plot_df %>%
+    filter(low_denominator, mortality_obs > 0)
+
+  invalid_df <- plot_df %>%
+    filter(invalid_denominator, mortality_obs > 0)
+
+  if (nrow(stable_df) == 0) {
+    return(
+      ggplot() +
+        theme_void() +
+        labs(
+          title = "No time bins meet the denominator threshold",
+          subtitle = paste0(
+            "No ", time_bin,
+            " contained at least ", min_all_obs,
+            " matching observations. Lower the threshold or use a broader time aggregation."
+          )
+        )
+    )
+  }
+
+  bin_title <- switch(
+    time_bin,
+    day = "Daily",
+    week = "Weekly",
+    month = "Monthly",
+    "Time-bin"
+  )
+
+  pct_max <- suppressWarnings(max(stable_df$plot_pct, na.rm = TRUE))
+  if (!is.finite(pct_max) || pct_max <= 0) pct_max <- 1
+  y_upper <- min(100, max(1, pct_max * 1.15))
+
+  # Labels are deliberately limited to the largest values to keep the lower
+  # panel readable over long date ranges.
+  label_df <- positive_stable %>%
+    arrange(desc(plot_pct), desc(all_obs), obs_bin) %>%
+    slice_head(n = 12)
+
+  p <- ggplot(plot_df, aes(x = obs_bin, y = plot_pct)) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.35,
+      color = "grey72"
+    ) +
+    
+    geom_line(
+      data = stable_df,
+      aes(
+        color = Window,
+        group = interaction(Window, line_group)
+      ),
+      linewidth = 0.7,
+      na.rm = TRUE
+    ) +
+    
+    # Zero-mortality bins: hollow circles with year-colored borders
+    geom_point(
+      data = zero_stable,
+      aes(color = Window),
+      shape = 21,
+      fill = "white",
+      size = 2.8,
+      stroke = 0.65,
+      na.rm = TRUE
+    ) +
+    
+    # Positive mortality bins: filled with the year color
+    geom_point(
+      data = positive_stable,
+      aes(
+        color = Window,
+        fill = Window
+      ),
+      shape = 21,
+      size = 2.8,
+      stroke = 0.65,
+      na.rm = TRUE
+    ) +
+    
+    scale_color_viridis_d(
+      option = "D",
+      end = 0.9,
+      limits = year_levels,
+      drop = FALSE,
+      name = "Window"
+    ) +
+    
+    scale_fill_viridis_d(
+      option = "D",
+      end = 0.9,
+      limits = year_levels,
+      drop = FALSE,
+      guide = "none"
+    ) +
     {
-      if (nrow(unstable_df) > 0) {
+      if (nrow(suppressed_df) > 0) {
         geom_point(
-          data = unstable_df,
+          data = suppressed_df,
           aes(x = obs_bin, y = 0),
-          shape = 124,
-          color = "grey45",
-          size = 3.5,
+          shape = 4,
+          stroke = 0.9,
+          size = 2.8,
+          color = "grey48",
           inherit.aes = FALSE
         )
       }
     } +
-    geom_point(
-      data = anomaly_df,
-      aes(x = obs_bin, y = mortality_pct),
-      color = "red3",
-      size = 2.6,
-      inherit.aes = FALSE
-    ) +
-    make_adaptive_date_scale(start_date, end_date, time_bin = time_bin) +
-    scale_y_continuous(
-      labels = function(x) paste0(formatC(x, digits = 2, format = "f"), "%"),
-      expand = expansion(mult = c(0, 0.06)),
-      limits = c(0, NA)
-    ) +
-    labs(
-      title = "Mortality Rate Through Time",
-      subtitle = glue("{start_date} to {end_date}\nRate shown only for bins with at least {min_all_obs_for_rate} total observations and {min_dead_obs_for_rate} mortality observations. Grey ticks at zero mark unstable bins excluded from the rate line."),
-      x = "Observation date",
-      y = "Mortality rate (% of all observations)"
-    ) +
-    coord_cartesian(clip = "off") +
-    theme_minimal(base_size = 14) +
-    theme_ts
-  
-  if (show_smoother && nrow(rate_df) >= 10 && length(unique(rate_df$mortality_pct)) >= 3) {
-    smooth_df <- make_nonnegative_smooth_df(rate_df, x_col = "obs_bin", y_col = "mortality_pct", span = 0.35)
-    
-    if (nrow(smooth_df) > 0) {
-      p <- p +
-        geom_line(
-          data = smooth_df,
-          aes(x = obs_bin, y = smooth_value),
-          color = "black",
-          linewidth = 0.75,
+    {
+      if (nrow(invalid_df) > 0) {
+        geom_point(
+          data = invalid_df,
+          aes(x = obs_bin, y = 0),
+          shape = 8,
+          size = 3,
+          color = "red3",
           inherit.aes = FALSE
         )
-    }
+      }
+    } +
+    make_adaptive_date_scale(start_date, end_date, time_bin = time_bin) +
+    scale_y_continuous(
+      labels = scales::label_percent(scale = 1, accuracy = 0.1),
+      expand = expansion(mult = c(0, 0.08))
+    ) +
+    coord_cartesian(
+      ylim = c(0, y_upper),
+      clip = "off"
+    ) +
+    labs(
+      title = paste0(
+        bin_title,
+        " Percentage of ",
+        tools::toTitleCase(scope_label),
+        " Annotated as Dead"
+      ),
+      subtitle = paste0(
+        start_date, " to ", end_date,
+        "\nEach ", time_bin,
+        " is calculated independently from the mortality and all-observation counts in that same time bin."
+      ),
+      x = "Observation date",
+      y = "Annotated as dead (%)",
+      caption = paste0(
+        "Percentages are displayed only when the denominator is at least ",
+        min_all_obs,
+        ". Grey crosses mark non-zero mortality bins below that threshold; red stars mark invalid numerator-denominator combinations."
+      )
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold", size = 20),
+      plot.subtitle = element_text(color = "grey30", size = 11, lineheight = 1.15),
+      plot.caption = element_text(color = "grey35", size = 9, hjust = 0),
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        color = "black",
+        margin = margin(t = 8)
+      ),
+      axis.text.y = element_text(color = "black"),
+      axis.title.x = element_text(face = "bold", margin = margin(t = 18)),
+      axis.title.y = element_text(face = "bold", margin = margin(r = 18)),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      legend.position = "none",
+      plot.margin = margin(t = 12, r = 32, b = 70, l = 65)
+    )
+
+  if (isTRUE(show_labels) && nrow(label_df) > 0) {
+    p <- p +
+      geom_text(
+        data = label_df,
+        aes(
+          x = obs_bin,
+          y = plot_pct,
+          label = count_label
+        ),
+        vjust = -0.9,
+        size = 3,
+        color = "grey20",
+        check_overlap = TRUE,
+        inherit.aes = FALSE
+      )
   }
-  
+
   p
 }
+
+
+make_mortality_percentage_summary <- function(
+    df,
+    time_bin = "day",
+    all_obs_histogram_df = NULL,
+    min_all_obs = 20
+) {
+
+  pct_all <- prepare_mortality_percentage_data(
+    df = df,
+    time_bin = time_bin,
+    all_obs_histogram_df = all_obs_histogram_df,
+    min_all_obs = min_all_obs
+  )
+
+  if (nrow(pct_all) == 0) {
+    return("Relative-percentage summary unavailable.")
+  }
+
+  stable_df <- pct_all %>%
+    filter(displayed, is.finite(mortality_pct))
+
+  suppressed_n <- sum(pct_all$low_denominator & pct_all$mortality_obs > 0, na.rm = TRUE)
+  invalid_n <- sum(pct_all$invalid_denominator & pct_all$mortality_obs > 0, na.rm = TRUE)
+  median_denominator <- suppressWarnings(stats::median(pct_all$all_obs[pct_all$all_obs > 0], na.rm = TRUE))
+
+  peak_line <- "NA"
+  if (nrow(stable_df) > 0) {
+    peak <- stable_df %>%
+      arrange(desc(mortality_pct), desc(all_obs), obs_bin) %>%
+      slice_head(n = 1)
+
+    peak_line <- paste0(
+      format(peak$obs_bin, "%Y-%m-%d"),
+      ": ",
+      formatC(peak$mortality_pct, format = "f", digits = 2),
+      "% (",
+      peak$count_label,
+      ")"
+    )
+  }
+
+  paste0(
+    "Relative-percentage summary:\n",
+    "- Displayed time bins: ", nrow(stable_df), "\n",
+    "- Minimum denominator: ", format(min_all_obs, big.mark = ","), "\n",
+    "- Median denominator: ",
+    ifelse(is.finite(median_denominator), format(round(median_denominator), big.mark = ","), "NA"),
+    "\n",
+    "- Non-zero bins suppressed: ", suppressed_n, "\n",
+    "- Invalid bins suppressed: ", invalid_n, "\n",
+    "- Highest displayed percentage: ", peak_line
+  )
+}
+
+
+
+compact_summary_item <- function(label, value, note = NULL) {
+  tags$div(
+    class = "compact-summary-item",
+    tags$div(class = "compact-summary-label", label),
+    tags$div(class = "compact-summary-value", value),
+    if (!is.null(note) && nzchar(as.character(note))) {
+      tags$div(class = "compact-summary-note", note)
+    }
+  )
+}
+
+make_compact_results_summary_ui <- function(
+    df,
+    time_bin = "day",
+    all_obs_histogram_df = NULL,
+    min_all_obs = 20,
+    diagnostics = NULL,
+    threat_mode_label = NULL,
+    include_percentage = FALSE
+) {
+
+  if (is.null(df) || nrow(df) == 0 || !"observed_on" %in% names(df)) {
+    return(tags$p("No summary is available for the current query."))
+  }
+
+  tmp <- df %>%
+    standardize_inat_columns() %>%
+    mutate(
+      obs_date = as.Date(observed_on),
+      summary_record_id = if ("id" %in% names(.)) {
+        dplyr::if_else(
+          is.na(id),
+          paste0("row_", dplyr::row_number()),
+          as.character(id)
+        )
+      } else {
+        as.character(dplyr::row_number())
+      }
+    ) %>%
+    filter(!is.na(obs_date))
+
+  if (nrow(tmp) == 0) {
+    return(tags$p("No valid observation dates are available for the current query."))
+  }
+
+  mortality_records <- dplyr::n_distinct(tmp$summary_record_id)
+
+  unique_observers <- if ("observer_std" %in% names(tmp)) {
+    observer_values <- tmp$observer_std
+    observer_values <- observer_values[
+      !is.na(observer_values) & nzchar(as.character(observer_values))
+    ]
+    dplyr::n_distinct(observer_values)
+  } else {
+    NA_integer_
+  }
+
+  counts_by_day <- tmp %>%
+    count(obs_date, name = "n") %>%
+    arrange(obs_date)
+
+  active_days <- nrow(counts_by_day)
+  average_per_active_day <- mean(counts_by_day$n)
+  peak_value <- max(counts_by_day$n, na.rm = TRUE)
+  peak_dates <- counts_by_day %>%
+    filter(n == peak_value) %>%
+    pull(obs_date)
+
+  peak_date_label <- paste(format(peak_dates, "%Y-%m-%d"), collapse = ", ")
+  if (length(peak_dates) > 2) {
+    peak_date_label <- paste0(
+      paste(format(peak_dates[1:2], "%Y-%m-%d"), collapse = ", "),
+      " + ", length(peak_dates) - 2, " more"
+    )
+  }
+
+  date_range_label <- paste(
+    format(min(tmp$obs_date), "%Y-%m-%d"),
+    "to",
+    format(max(tmp$obs_date), "%Y-%m-%d")
+  )
+
+  record_items <- list(
+    compact_summary_item(
+      "Mortality records",
+      format(mortality_records, big.mark = ",")
+    ),
+    compact_summary_item(
+      "Unique observers",
+      ifelse(
+        is.na(unique_observers),
+        "NA",
+        format(unique_observers, big.mark = ",")
+      )
+    ),
+    compact_summary_item(
+      "Active days",
+      format(active_days, big.mark = ",")
+    ),
+    compact_summary_item(
+      "Average per active day",
+      formatC(average_per_active_day, format = "f", digits = 2)
+    ),
+    compact_summary_item(
+      "Peak day",
+      paste0(peak_value, " records"),
+      peak_date_label
+    ),
+    compact_summary_item(
+      "Observed mortality range",
+      date_range_label
+    )
+  )
+
+  percentage_section <- NULL
+
+  if (isTRUE(include_percentage)) {
+    pct_all <- prepare_mortality_percentage_data(
+      df = df,
+      time_bin = time_bin,
+      all_obs_histogram_df = all_obs_histogram_df,
+      min_all_obs = min_all_obs
+    )
+
+    if (nrow(pct_all) > 0) {
+      stable_df <- pct_all %>%
+        filter(displayed, is.finite(mortality_pct))
+
+      suppressed_n <- sum(
+        pct_all$low_denominator & pct_all$mortality_obs > 0,
+        na.rm = TRUE
+      )
+
+      peak_percentage_label <- "NA"
+      peak_percentage_note <- NULL
+
+      if (nrow(stable_df) > 0) {
+        peak_percentage <- stable_df %>%
+          arrange(desc(mortality_pct), desc(all_obs), obs_bin) %>%
+          slice_head(n = 1)
+
+        peak_percentage_label <- paste0(
+          formatC(peak_percentage$mortality_pct, format = "f", digits = 2),
+          "%"
+        )
+        peak_percentage_note <- paste0(
+          format(peak_percentage$obs_bin, "%Y-%m-%d"),
+          " (", peak_percentage$count_label, ")"
+        )
+      }
+
+      percentage_section <- tagList(
+        tags$div(class = "compact-summary-section-title", "Relative-percentage quality checks"),
+        tags$div(
+          class = "compact-summary-grid compact-summary-grid-secondary",
+          compact_summary_item(
+            "Displayed time bins",
+            format(nrow(stable_df), big.mark = ",")
+          ),
+          compact_summary_item(
+            "Minimum denominator",
+            format(min_all_obs, big.mark = ",")
+          ),
+          compact_summary_item(
+            "Suppressed non-zero bins",
+            format(suppressed_n, big.mark = ",")
+          ),
+          compact_summary_item(
+            "Highest displayed percentage",
+            peak_percentage_label,
+            peak_percentage_note
+          )
+        )
+      )
+    }
+  }
+
+  diagnostics <- diagnostics %||% list()
+
+  technical_details <- tags$details(
+    class = "compact-diagnostics",
+    tags$summary("Technical query details"),
+    tags$div(
+      class = "compact-diagnostics-grid",
+      compact_summary_item(
+        "API results reported",
+        format(diagnostics$total_results_reported %||% NA, big.mark = ",")
+      ),
+      compact_summary_item(
+        "Final records returned",
+        format(diagnostics$total_rows %||% mortality_records, big.mark = ",")
+      ),
+      compact_summary_item(
+        "Pages fetched",
+        format(diagnostics$pages_fetched %||% 0, big.mark = ",")
+      ),
+      compact_summary_item(
+        "Adaptive querying",
+        ifelse(isTRUE(diagnostics$adaptive_used), "Yes", "No")
+      ),
+      compact_summary_item(
+        "Paging",
+        ifelse(isTRUE(diagnostics$paging_used), "Yes", "No")
+      ),
+      compact_summary_item(
+        "Threat-status filter",
+        sub("^Threat-status filtering:\\s*", "", threat_mode_label %||% "not selected")
+      )
+    ),
+    tags$p(
+      class = "compact-diagnostics-note",
+      "The downloadable query-metadata JSON retains the full technical diagnostics."
+    )
+  )
+
+  tagList(
+    tags$div(class = "compact-summary-section-title", "Query overview"),
+    do.call(tags$div, c(list(class = "compact-summary-grid"), record_items)),
+    percentage_section,
+    technical_details
+  )
+}
+
 
 make_top_species_plot <- function(df) {
   
@@ -3531,6 +4025,106 @@ ui <- fluidPage(
     margin-top: 0;
     margin-bottom: 0;
   }
+
+  .stacked-percentage-section {
+    border-top: 1px solid #e6e8eb;
+    margin-top: 24px;
+    padding-top: 14px;
+  }
+
+  /* The two Daily Time Series panels deliberately use identical dimensions. */
+  .main-plot-panel.time-series-panel {
+    min-height: 820px;
+    padding: 18px 18px 24px 18px;
+    margin-bottom: 20px;
+  }
+
+  .main-plot-panel.time-series-panel .shiny-plot-output {
+    width: 100% !important;
+  }
+
+  .compact-results-card {
+    margin-top: 14px;
+    padding: 16px 18px;
+  }
+
+  .compact-summary-section-title {
+    color: #334155;
+    font-size: 15px;
+    font-weight: 750;
+    margin: 2px 0 10px 0;
+  }
+
+  .compact-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    gap: 10px;
+  }
+
+  .compact-summary-grid-secondary {
+    margin-bottom: 4px;
+  }
+
+  .compact-summary-item {
+    background: #f8fafc;
+    border: 1px solid #e6e8eb;
+    border-radius: 7px;
+    padding: 10px 12px;
+    min-height: 70px;
+  }
+
+  .compact-summary-label {
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.2;
+    margin-bottom: 5px;
+  }
+
+  .compact-summary-value {
+    color: #1f2937;
+    font-size: 18px;
+    font-weight: 750;
+    line-height: 1.15;
+  }
+
+  .compact-summary-note {
+    color: #64748b;
+    font-size: 10px;
+    line-height: 1.25;
+    margin-top: 5px;
+  }
+
+  .compact-diagnostics {
+    border-top: 1px solid #e6e8eb;
+    margin-top: 14px;
+    padding-top: 12px;
+  }
+
+  .compact-diagnostics summary {
+    color: #50627a;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    user-select: none;
+  }
+
+  .compact-diagnostics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .compact-diagnostics .compact-summary-item {
+    min-height: 62px;
+    padding: 8px 10px;
+  }
+
+  .compact-diagnostics-note {
+    color: #6b7280;
+    font-size: 10px;
+    margin: 9px 0 0 0;
+  }
 ")),
     # "))
   ),
@@ -3572,6 +4166,7 @@ ui <- fluidPage(
   
   sidebarLayout(
     sidebarPanel(
+      width = 3,
       tabsetPanel(
         id = "sidebar_tabs",
         
@@ -3637,27 +4232,49 @@ ui <- fluidPage(
             selected = "day"
           ),
           
+          tags$h4("Time-series controls"),
+
+          tags$h5("Time-series metric"),
           radioButtons(
             "metric_type",
-            "Daily plot metric:",
+            "Mortality-record plot metric:",
             choices = c(
               "Raw counts" = "raw_counts",
               "Unique observers" = "unique_observers",
-              "Observations per observer" = "obs_per_observer"
+              "Observations per observer" = "obs_per_observer",
+              "Relative percentage" = "relative_percentage"
             ),
             selected = "raw_counts"
           ),
-          
-          checkboxInput("show_smoother", "Show smoother", value = TRUE),
-          checkboxInput(
-            "show_all_activity",
-            "Also show mortality as % of total observations",
-            value = FALSE
+          conditionalPanel(
+            condition = "input.metric_type != 'relative_percentage'",
+            checkboxInput(
+              "show_smoother",
+              "Show smoother on mortality-record plot",
+              value = TRUE
+            )
           ),
-          helpText(
-            "Adds a second axis showing each time bin's dead observations divided by the total number of all iNaturalist observations across the full selected query. Use as descriptive context, not a formal mortality rate."
+
+          conditionalPanel(
+            condition = "input.metric_type == 'relative_percentage'",
+            tags$h5("Relative-percentage controls"),
+            numericInput(
+              "min_all_obs_for_pct",
+              "Minimum matching observations per time bin:",
+              value = 20,
+              min = 1,
+              step = 1
+            ),
+            checkboxInput(
+              "show_pct_labels",
+              "Label the largest non-zero bins as mortality / total",
+              value = FALSE
+            ),
+            helpText(
+              "The percentage plot is calculated independently for every day, week, or month: mortality-tagged observations divided by all matching iNaturalist observations in that same time bin. Low-denominator bins are marked but not plotted as percentages."
+            )
           ),
-          
+
           hr(),
           
           radioButtons(
@@ -3963,7 +4580,7 @@ ui <- fluidPage(
             tags$li("Upload a study area file (.zip shapefile, zipped .gdb, .gpkg, .geojson, or .kml) or draw a rectangle on the map."),
             tags$li("Set your date range."),
             tags$li("Choose the time aggregation: day, week, or month."),
-            tags$li("Choose whether you want to inspect raw mortality counts, unique observers, or observations per observer."),
+            tags$li("Use the upper plot for counts, unique observers, or observations per observer, and the lower plot for mortality-tagged observations divided by all matching observations within each time bin."),
             tags$li("Choose a filter mode: taxonomy or conservation / threat status."),
             tags$li("Pick Live for current records or Archived for faster reproducible querying."),
             tags$li("Run the query and inspect the plots, diagnostics, maps, and data table."),
@@ -4015,7 +4632,7 @@ ui <- fluidPage(
           
           tags$h4("Practical interpretation tips"),
           tags$ul(
-            tags$li("Compare raw counts against unique observers when interpreting spikes."),
+            tags$li("Compare raw counts against unique observers when interpreting spikes, then inspect the lower relative-percentage plot to account descriptively for changes in matching iNaturalist activity through time."),
             tags$li("Use observations per observer as a simple effort-sensitive contextual metric."),
             tags$li("Check the All Data Table to inspect status authority, status code, status name, and positional_accuracy directly."),
             tags$li("Use the static hexbin map for overview patterns and the interactive map for quick spatial exploration."),
@@ -4062,67 +4679,40 @@ ui <- fluidPage(
     
     # mainPanel(
     mainPanel(
-      style = "padding: 20px;",
+      width = 9,
+      style = "padding: 12px 14px 24px 14px;",
       tabsetPanel(
         tabPanel(
           "Daily Time Series",
-          div(class = "note-box", textOutput("samplingNote")),
           uiOutput("querySummaryCards"),
-          fluidRow(
-            column(
-              width = 8,
-              div(
-                class = "main-plot-panel",
-                # # Added total number of observations
-                # div(
-                #   style = "margin-bottom: 8px; font-weight: 600;",
-                #   textOutput("total_inat_text")
-                # ),
-                # div(
-                #   style = "margin-bottom: 8px; font-weight: 600;",
-                #   textOutput("total_taxon_inat_text")
-                # ),
-                # div(
-                #   style = "margin-bottom: 8px; font-weight: 600;",
-                #   textOutput("total_taxon_mortality_text")
-                # ),
-                # # withSpinner(plotOutput("dailyPlot", height = "650px"), type = 6)
-                withSpinner(plotOutput("dailyPlot", height = "850px"), type = 6)
-              )
-            ),
-            column(
-              width = 4,
-              verbatimTextOutput("dailySummary"),
-              br(),
-              verbatimTextOutput("queryDiagnostics")
+
+          # Show one time-series plot at a time so the selected metric has more vertical space.
+          conditionalPanel(
+            condition = "input.metric_type != 'relative_percentage'",
+            div(class = "note-box", textOutput("samplingNote")),
+            div(
+              class = "main-plot-panel time-series-panel",
+              withSpinner(plotOutput("dailyPlot", height = "780px"), type = 6)
             )
+          ),
+
+          conditionalPanel(
+            condition = "input.metric_type == 'relative_percentage'",
+            div(class = "stacked-percentage-section",
+              div(class = "note-box", textOutput("percentageNote")),
+              div(
+                class = "main-plot-panel time-series-panel",
+                withSpinner(plotOutput("mortalityPercentagePlot", height = "780px"), type = 6)
+              )
+            )
+          ),
+
+          div(
+            class = "about-card compact-results-card",
+            uiOutput("compactResultsSummary")
           )
         ),
-        
-        # tabPanel(
-        #   "Mortality Rate",
-        #   div(class = "note-box", textOutput("mortalityRateNote")),
-        #   fluidRow(
-        #     column(
-        #       width = 8,
-        #       div(
-        #         class = "main-plot-panel",
-        #         withSpinner(plotOutput("mortalityRatePlot", height = "850px"), type = 6)
-        #       )
-        #     ),
-        #     column(
-        #       width = 4,
-        #       tags$h4("Interpretation"),
-        #       tags$p(
-        #         "This plot shows mortality-tagged observations as a percentage of all iNaturalist observations in the same time bin."
-        #       ),
-        #       tags$p(
-        #         "Use it as an effort-adjusted descriptive index, not as a formal mortality rate."
-        #       )
-        #     )
-        #   )
-        # ),
-        
+
         tabPanel(
           "Top Species",
           div(
@@ -4629,7 +5219,7 @@ server <- function(input, output, session) {
     swlng <- bb$swlng
     nelat <- bb$nelat
     nelng <- bb$nelng
-    crosses_antimeridian <- isTRUE(bb$crosses_antimeridian)
+   # crosses_antimeridian <- isTRUE(bb$crosses_antimeridian)
     is_near_global <- isTRUE(bb$is_near_global)
     query_windows <- bbox_to_query_windows(bb)
     
@@ -5148,15 +5738,42 @@ server <- function(input, output, session) {
   ##################################################################################################
   # OUTPUTS
   ##################################################################################################
+  percentage_scope_label <- reactive({
+    taxon_count_query <- selected_taxonomy_count_query()
+
+    if (
+      input$filter_mode == "taxonomy" &&
+      !is.null(taxon_count_query$label) &&
+      nzchar(as.character(taxon_count_query$label))
+    ) {
+      return(paste0("selected-taxon [", taxon_count_query$label, "]"))
+    }
+
+    "matching"
+  })
+
   output$samplingNote <- renderText({
-    effective_metric <- if (isTRUE(input$show_all_activity)) "dead_vs_all" else input$metric_type
-    make_sampling_note(effective_metric)
+    make_sampling_note(input$metric_type)
   })
-  
-  output$mortalityRateNote <- renderText({
-    make_sampling_note("dead_vs_all")
+
+  output$percentageNote <- renderText({
+    polygon_note <- if (!is.null(rv$uploaded_study_area)) {
+      " For uploaded polygons, the current denominator is calculated for the polygon's bounding box rather than by exact in-polygon clipping."
+    } else {
+      ""
+    }
+
+    paste0(
+      "Lower-plot note: each ", input$time_bin,
+      " value uses a separate denominator for that same time bin. The numerator is mortality-tagged observations after the active filters; the denominator is all ",
+      percentage_scope_label(),
+      " iNaturalist observations returned by the histogram query. Bins with fewer than ",
+      input$min_all_obs_for_pct %||% 20,
+      " matching observations are marked at zero and excluded from the percentage line.",
+      polygon_note
+    )
   })
-  
+
   output$querySummaryCards <- renderUI({
     req(result_data())
     rd <- result_data()
@@ -5180,11 +5797,21 @@ server <- function(input, output, session) {
       "selected query window"
     }
     
+    all_obs_label <- if (
+      length(taxon_total) > 0 &&
+      is.finite(taxon_total[1]) &&
+      taxon_total[1] > 0
+    ) {
+      "All selected-taxon observations"
+    } else {
+      "All matching observations"
+    }
+
     tags$div(
       class = "query-summary-row",
       summary_stat_card("Mortality records", stats$mortality_records, "after active filters"),
-      summary_stat_card("All observations", stats$all_observations, all_obs_note),
-      summary_stat_card("Mortality % of total", stats$mortality_pct, "records / all observations"),
+      summary_stat_card(all_obs_label, stats$all_observations, all_obs_note),
+      summary_stat_card("Annotated-dead % of matching observations", stats$mortality_pct, "whole selected window"),
       summary_stat_card("Unique observers", stats$unique_observers, "after active filters"),
       summary_stat_card("Peak time bin", stats$peak_time_bin, stats$peak_time_note)
     )
@@ -5271,43 +5898,113 @@ server <- function(input, output, session) {
     )
   })
   
+  mortality_axis_range <- reactive({
+    req(result_data())
+
+    mortality_dates <- as.Date(
+      result_data()$merged_df_all$observed_on
+    )
+
+    mortality_dates <- mortality_dates[
+      !is.na(mortality_dates)
+    ]
+
+    shiny::req(length(mortality_dates) > 0)
+
+    axis_start <- make_time_bin(
+      min(mortality_dates),
+      time_bin = input$time_bin
+    )
+
+    axis_end <- make_time_bin(
+      max(mortality_dates),
+      time_bin = input$time_bin
+    )
+
+    # Prevent a zero-width axis when only one time bin exists.
+    if (axis_start == axis_end) {
+      axis_start <- axis_start - 1
+      axis_end <- axis_end + 1
+    }
+
+    c(axis_start, axis_end)
+  })
+
   output$dailyPlot <- renderPlot({
     req(result_data())
+
     rd <- result_data()
-    
-    effective_metric <- if (isTRUE(input$show_all_activity)) "dead_vs_all" else input$metric_type
-    
+    axis_range <- mortality_axis_range()
+
     make_daily_plot(
       rd$merged_df_all,
-      start_date = input$date_range[1],
-      end_date = input$date_range[2],
+      start_date = axis_range[1],
+      end_date = axis_range[2],
       time_bin = input$time_bin,
-      metric_type = effective_metric,
+      metric_type = input$metric_type,
       show_smoother = input$show_smoother,
-      all_obs_histogram_df = if (isTRUE(input$show_all_activity)) rv$all_obs_histogram else NULL
+      all_obs_histogram_df = NULL
     )
   }, res = 140)
-  
-  output$mortalityRatePlot <- renderPlot({
+
+  output$mortalityPercentagePlot <- renderPlot({
     req(result_data())
+
     rd <- result_data()
-    
-    make_mortality_rate_plot(
+    axis_range <- mortality_axis_range()
+
+    make_mortality_percentage_plot(
       rd$merged_df_all,
-      start_date = input$date_range[1],
-      end_date = input$date_range[2],
+      start_date = axis_range[1],
+      end_date = axis_range[2],
       time_bin = input$time_bin,
-      show_smoother = input$show_smoother,
-      all_obs_histogram_df = rv$all_obs_histogram
+      all_obs_histogram_df = rv$all_obs_histogram,
+      min_all_obs = input$min_all_obs_for_pct %||% 20,
+      show_labels = isTRUE(input$show_pct_labels),
+      scope_label = percentage_scope_label()
     )
   }, res = 140)
-  
+
+  output$compactResultsSummary <- renderUI({
+    req(result_data())
+
+    make_compact_results_summary_ui(
+      df = result_data()$merged_df_all,
+      time_bin = input$time_bin,
+      all_obs_histogram_df = rv$all_obs_histogram,
+      min_all_obs = input$min_all_obs_for_pct %||% 20,
+      diagnostics = result_data()$diagnostics,
+      threat_mode_label = result_data()$threat_mode_label,
+      include_percentage = identical(input$metric_type, "relative_percentage")
+    )
+  })
+
+  output$percentageSummary <- renderText({
+    req(result_data())
+
+    make_mortality_percentage_summary(
+      result_data()$merged_df_all,
+      time_bin = input$time_bin,
+      all_obs_histogram_df = rv$all_obs_histogram,
+      min_all_obs = input$min_all_obs_for_pct %||% 20
+    )
+  })
+
   output$dailySummary <- renderText({
     req(result_data())
     make_summary_text(result_data()$merged_df_all)
   })
   
   output$queryDiagnostics <- renderText({
+    req(result_data())
+    make_diagnostics_text(
+      result_data()$diagnostics,
+      threat_mode_label = result_data()$threat_mode_label
+    )
+  })
+
+
+  output$queryDiagnosticsPercentage <- renderText({
     req(result_data())
     make_diagnostics_text(
       result_data()$diagnostics,
