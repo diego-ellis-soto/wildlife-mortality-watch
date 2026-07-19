@@ -353,8 +353,6 @@ display: none;
 </div>
 
 
-<div id="wildlife-mortality-watch" class="section level1">
-<h1>Wildlife Mortality Watch</h1>
 <div id="overview" class="section level2">
 <h2>Overview</h2>
 <p>This archive contains the version-of-record application code,
@@ -553,9 +551,6 @@ file preserves the snapshot used in the manuscript analyses.</td>
 </tr>
 </tbody>
 </table>
-<p>Add any query-metadata JSON files, data dictionaries, checksums,
-derived tables, or additional deposited files to this inventory using
-their exact filenames.</p>
 </div>
 </div>
 <div id="externally-sourced-or-non-redistributed-data" class="section level2">
@@ -590,84 +585,17 @@ workflow.</td>
 <td><code>Africa_inat_dead_filtered_2026-05-12.csv</code></td>
 <td>The record-level dataset used for the Africa threatened-species case
 study is not included in the public Zenodo archive. It may be provided
-by the corresponding author upon reasonable request, subject to
-applicable iNaturalist record-level licenses and data-use requirements.
-The archived analysis code documents the expected filename, structure,
-filters, and processing workflow.</td>
+by the corresponding author upon reasonable request. The archived
+analysis code documents the expected filename, structure, filters, and
+processing workflow.</td>
 </tr>
 </tbody>
 </table>
-<p>To support reproducibility of the Africa case study, the final
-archive should also include, where possible:</p>
-<ul>
-<li>the iNaturalist observation identifiers used in the analysis;</li>
-<li>the query date;</li>
-<li>the spatial and temporal query definition;</li>
-<li>selected conservation-status categories;</li>
-<li>query metadata and diagnostics;</li>
-<li>derived summary values reported in the manuscript; and</li>
-<li>code for reconstructing the analysis from public source
-records.</li>
-</ul>
 </div>
 <div id="software-requirements" class="section level2">
 <h2>Software requirements</h2>
 <p>The application and analyses were developed in R. The California
 spatial workflow was developed using R 4.4.1.</p>
-<p>Principal application packages include:</p>
-<pre class="text"><code>shiny
-bslib
-shinyjs
-shinycssloaders
-tidyverse
-httr
-jsonlite
-glue
-lubridate
-viridis
-hexbin
-DT
-leaflet
-leaflet.extras
-maps
-mapdata
-arrow
-sf
-cowplot
-stringr
-scales</code></pre>
-<p>Principal analysis packages include:</p>
-<pre class="text"><code>tidyverse
-ggplot2
-sf
-raster
-units
-tidycensus
-tigris
-mapview
-viridis
-cowplot
-patchwork
-gridExtra
-ggimage
-rnaturalearth
-rnaturalearthdata
-arrow
-treemapify
-tidygraph
-ggraph
-ineq
-jsonlite
-httr2
-glue
-lubridate
-purrr
-forcats</code></pre>
-<p>For a fully versioned R environment, include an
-<code>renv.lock</code> file and restore the package environment
-with:</p>
-<pre class="r"><code>install.packages(&quot;renv&quot;)
-renv::restore()</code></pre>
 </div>
 <div id="running-the-shiny-application" class="section level2">
 <h2>Running the Shiny application</h2>
@@ -682,34 +610,16 @@ renv::restore()</code></pre>
 <li>retrieval of remote datasets that are not included locally.</li>
 </ul>
 </div>
-<div id="with-docker" class="section level3">
-<h3>With Docker</h3>
-<p>From the project root, run:</p>
-<pre class="bash"><code>docker build -t wildlife-mortality-watch Code/src
-docker run --rm -p 7860:7860 wildlife-mortality-watch</code></pre>
-<p>Then open:</p>
-<pre class="text"><code>http://localhost:7860</code></pre>
-<p>in a web browser.</p>
-</div>
 </div>
 <div id="reproducing-the-manuscript-analyses" class="section level2">
 <h2>Reproducing the manuscript analyses</h2>
 <ol style="list-style-type: decimal">
-<li>Download and extract the complete Zenodo archive.</li>
+<li>Download and extract the Zenodo archive.</li>
 <li>Set the extracted archive directory as the R working directory.</li>
-<li>Confirm that the deposited files follow the directory structure
-documented above.</li>
-<li>Create the output directory when it does not already exist:</li>
-</ol>
-<pre class="r"><code>dir.create(&quot;outdir&quot;, showWarnings = FALSE, recursive = TRUE)</code></pre>
-<ol start="5" style="list-style-type: decimal">
-<li>Install or restore the required R packages.</li>
 <li>Open <code>Code/src/ms_analysis.R</code>.</li>
 <li>Obtain the non-redistributed IUCN range layer when reproducing the
 puma range analysis.</li>
-<li>Contact the corresponding author regarding access to the Africa
-case-study CSV when record-level reproduction is required.</li>
-<li>Run the documented analysis sections in order.</li>
+<li>Run the analysis .</li>
 </ol>
 <p>The script contains workflows for:</p>
 <ul>
@@ -723,62 +633,11 @@ archive; and</li>
 <li>annual percentages of Animalia and major taxonomic-group
 observations annotated as dead.</li>
 </ul>
-<p>Some sections retrieve roads, country boundaries, flags, or
-iNaturalist totals from external services. Results obtained from live
-services can change after publication. Exact reproduction therefore
-depends on the fixed datasets, query metadata, and derived values
-archived with this release.</p>
-</div>
-<div id="application-metrics" class="section level2">
-<h2>Application metrics</h2>
-<p>The application provides several complementary temporal metrics.</p>
-<div id="mortality-annotated-observations" class="section level3">
-<h3>Mortality-annotated observations</h3>
-<p>The number of iNaturalist observations annotated as dead within each
-selected day, week, or month.</p>
-</div>
-<div id="unique-observers" class="section level3">
-<h3>Unique observers</h3>
-<p>The number of unique iNaturalist users contributing
-mortality-annotated observations within each time bin.</p>
-</div>
-<div id="mortality-observations-per-observer" class="section level3">
-<h3>Mortality observations per observer</h3>
-<p>The number of mortality-annotated observations divided by the number
-of unique observers contributing those records within the time bin.</p>
-</div>
-<div id="percentage-of-observations-annotated-as-dead" class="section level3">
-<h3>Percentage of observations annotated as dead</h3>
-<p>For each time bin, the application calculates:</p>
-<pre class="text"><code>100 × mortality-annotated observations in the time bin
-      ------------------------------------------------
-      all observations matching the same taxonomic,
-      spatial, temporal, and quality criteria</code></pre>
-<p>The denominator is recalculated independently for each selected day,
-week, or month.</p>
-<p>This percentage is a descriptive observation index. It is not a
-biological mortality rate because iNaturalist observations are not
-generated through a standardized sampling design and the probability of
-detecting or reporting mortality is unknown.</p>
-</div>
 </div>
 <div id="data-provenance" class="section level2">
 <h2>Data provenance</h2>
 <p>The mortality-record CSV files were generated from public iNaturalist
 observations using Wildlife Mortality Watch.</p>
-<p>For each exported dataset, users should retain:</p>
-<ul>
-<li>observation identifiers;</li>
-<li>retrieval date;</li>
-<li>taxonomic filters;</li>
-<li>conservation-status filters;</li>
-<li>spatial bounds or study-area definition;</li>
-<li>date range;</li>
-<li>time aggregation;</li>
-<li>mortality numerator;</li>
-<li>all-observation denominator; and</li>
-<li>downloaded query metadata.</li>
-</ul>
 <p>The archived Parquet file is a fixed snapshot of mortality-annotated
 iNaturalist observations through 21 April 2026.</p>
 <p>External spatial data used in the analyses include:</p>
@@ -799,28 +658,8 @@ IUCN Red List before running the range-based puma analysis.</p>
 is not included in the public Zenodo deposit. It may be made available
 by the corresponding author upon reasonable request, subject to
 applicable record-level licensing and data-use conditions.</p>
-</div>
-<div id="interpretation-and-limitations" class="section level2">
-<h2>Interpretation and limitations</h2>
-<p>iNaturalist observations are opportunistic participatory-science
-records. Patterns presented by the application and manuscript analyses
-may reflect both ecological processes and variation in:</p>
-<ul>
-<li>observer participation;</li>
-<li>geographic accessibility;</li>
-<li>taxonomic detectability;</li>
-<li>seasonal platform activity;</li>
-<li>optional use of the alive/dead annotation;</li>
-<li>repeated reporting of the same mortality event or carcass;</li>
-<li>spatial uncertainty;</li>
-<li>obscured coordinates;</li>
-<li>taxonomic identifications;</li>
-<li>conservation-status metadata; and</li>
-<li>changes to source observations after retrieval.</li>
-</ul>
 <p>The application reports <strong>mortality-annotated
-observations</strong>, not independently verified causes of death or
-complete counts of mortality events.</p>
+observations</strong>.</p>
 <p>Signals identified through the application should be evaluated using
 individual-record inspection, local ecological knowledge, independent
 surveillance, and other relevant environmental or public-health
@@ -833,13 +672,10 @@ be interpreted cautiously.</p>
 </div>
 <div id="licensing" class="section level2">
 <h2>Licensing</h2>
-<p>Original software and analysis code in this release are distributed
-under the BSD 2-Clause License.</p>
-<p>iNaturalist observations, photographs, audio, and other media retain
-the licenses selected by their original contributors. This archive
-preserves observation identifiers and source links rather than
-redistributing photographs or audio unless their individual licenses
-permit redistribution.</p>
+<p>iNaturalist observations and other media retain the licenses selected
+by their original contributors. This archive preserves observation
+identifiers and source links rather than redistributing photographs or
+audio unless their individual licenses permit redistribution.</p>
 <p>Third-party spatial datasets retain their original licenses, access
 conditions, and citation requirements.</p>
 <p>The IUCN <em>Puma concolor</em> range layer is not redistributed
@@ -858,7 +694,7 @@ affiliated with or endorsed by iNaturalist.</p>
 <p>Ellis-Soto, D., Taylor, L. U., Edson, E., Hill, A., Schell, C. J.,
 Boettiger, C., and Johnson, R. F. ([YEAR]). <em>Code and data for:
 Global monitoring of wildlife mortality through participatory science in
-near-real time</em> (Version [VERSION]). Zenodo. <a href="https://doi.org/10.5281/zenodo.XXXXXXX" class="uri">https://doi.org/10.5281/zenodo.XXXXXXX</a></p>
+near-real time</em> (Version [VERSION]). Zenodo. XXX</p>
 </blockquote>
 </div>
 <div id="associated-paper" class="section level3">
@@ -869,43 +705,7 @@ Boettiger, C., and Johnson, R. F. (2025). <em>Global monitoring of
 wildlife mortality through participatory science in near-real time</em>.
 bioRxiv. <a href="https://doi.org/10.1101/2025.08.08.669145" class="uri">https://doi.org/10.1101/2025.08.08.669145</a></p>
 </blockquote>
-<p>When reporting an application query, also record:</p>
-<ul>
-<li>the archived software version or Git commit;</li>
-<li>date accessed;</li>
-<li>live or archived data mode;</li>
-<li>spatial query definition;</li>
-<li>date range;</li>
-<li>daily, weekly, or monthly aggregation;</li>
-<li>taxonomic or conservation-status filters;</li>
-<li>number of mortality-annotated observations;</li>
-<li>number of matching total observations;</li>
-<li>percentage calculation and denominator threshold; and</li>
-<li>downloaded query-metadata JSON file.</li>
-</ul>
 </div>
-</div>
-<div id="open-research-statement" class="section level2">
-<h2>Open Research statement</h2>
-<p>After the Zenodo record is publicly available, the manuscript may use
-the following statement:</p>
-<blockquote>
-<p><strong>Open Research.</strong> The data, derived data products,
-query metadata, and version-of-record R code supporting this study are
-archived in Zenodo: Ellis-Soto, D., Taylor, L. U., Edson, E., Hill, A.,
-Schell, C. J., Boettiger, C., and Johnson, R. F. ([YEAR]). <em>Code and
-data for: Global monitoring of wildlife mortality through participatory
-science in near-real time</em> (Version [VERSION]). Zenodo. <a href="https://doi.org/10.5281/zenodo.XXXXXXX" class="uri">https://doi.org/10.5281/zenodo.XXXXXXX</a>. The actively
-maintained development repository is available at <a href="https://github.com/diego-ellis-soto/wildlife-mortality-watch" class="uri">https://github.com/diego-ellis-soto/wildlife-mortality-watch</a>,
-and the interactive application is available at <a href="https://huggingface.co/spaces/diegoellissoto/wildlife-mortality-watch" class="uri">https://huggingface.co/spaces/diegoellissoto/wildlife-mortality-watch</a>.
-Source observations were obtained from iNaturalist and retain
-contributor-selected licenses. The <em>Puma concolor</em> range layer
-was obtained from the IUCN Red List and is not redistributed because it
-remains subject to IUCN access and reuse conditions. The record-level
-Africa case-study dataset may be provided by the corresponding author
-upon reasonable request, subject to applicable licensing and data-use
-requirements.</p>
-</blockquote>
 </div>
 <div id="contact" class="section level2">
 <h2>Contact</h2>
@@ -913,7 +713,6 @@ requirements.</p>
 Department of Environmental Science, Policy, and Management<br />
 University of California, Berkeley<br />
 <a href="mailto:diego.ellissoto@berkeley.edu" class="email">diego.ellissoto@berkeley.edu</a></p>
-</div>
 </div>
 
 
