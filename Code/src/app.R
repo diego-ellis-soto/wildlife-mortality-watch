@@ -2013,7 +2013,7 @@ make_hexbin_map <- function(df, start_date, end_date) {
 
 make_leaflet_hotspot_map <- function(df, bbox = NULL, max_points = 50000) {
   if (!all(c("latitude", "longitude") %in% names(df))) {
-    return(leaflet() %>% addProviderTiles(providers$CartoDB.Positron))
+    return(leaflet() %>% addProviderTiles(providers$Esri.NatGeoWorldMap))
   }
   
   map_df <- df %>%
@@ -2021,7 +2021,7 @@ make_leaflet_hotspot_map <- function(df, bbox = NULL, max_points = 50000) {
     filter(!is.na(latitude), !is.na(longitude))
   
   if (nrow(map_df) == 0) {
-    return(leaflet() %>% addProviderTiles(providers$CartoDB.Positron))
+    return(leaflet() %>% addProviderTiles(providers$Esri.NatGeoWorldMap))
   }
   
   if (nrow(map_df) > max_points) {
@@ -2072,7 +2072,7 @@ make_leaflet_hotspot_map <- function(df, bbox = NULL, max_points = 50000) {
   }
   
   m <- leaflet(map_df) %>%
-    addProviderTiles(providers$CartoDB.Positron) %>%
+    addProviderTiles(providers$Esri.NatGeoWorldMap) %>%
     addCircleMarkers(
       lng = ~longitude,
       lat = ~latitude,
